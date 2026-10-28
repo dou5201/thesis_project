@@ -27,7 +27,8 @@ from . import __version__
 from .acquisition import ExperimentController
 from .analysis import COLORS, apply_theme, load_recording, plot_analysis, plot_calibration, spectrum, \
     summary_table, temperature_drift
-from .config import BRIDGE_MODES, CHANNEL_MODES, DRATE_CODES, PGA_CODES, AppConfig
+from .config import BRIDGE_MODES, CHANNEL_MODES, DRATE_CODES, PGA_CODES, PZT_UNITS, STRAIN_UNITS, AppConfig
+from .file_source import DATA_SUFFIXES, FileSourceError, load_data_file
 from .hardware import HardwareError, hardware_libraries_available
 from .processing import BeamModel
 
@@ -44,11 +45,13 @@ LIVE_TRACES = (  # key, axis label, colour, minimum y-span
     ("deflection_mm", "Tip defl. [mm]", COLORS["defl"], 0.002),
     ("pzt_mV", "PZT [mV]", COLORS["pzt"], 5.0),
     ("temp_C", "Temp. [°C]", COLORS["temp"], 0.25),
+    ("stress_MPa", "Stress [MPa]", COLORS["stress"], 0.05),
 )
 READOUTS = (  # key, label, unit, format
     ("strain_ue", "Strain", "µε", "{:+.2f}"),
     ("deflection_mm", "Tip deflection", "mm", "{:+.4f}"),
     ("load_g", "Equivalent tip load", "g", "{:+.1f}"),
+    ("stress_MPa", "Bending stress", "MPa", "{:+.3f}"),
     ("pzt_mV", "PZT voltage", "mV", "{:+.1f}"),
     ("pzt_charge_nC", "PZT charge", "nC", "{:+.3f}"),
     ("temp_C", "Temperature", "°C", "{:.2f}"),
@@ -65,9 +68,14 @@ SETTING_LABELS = {
     "plot_window_s": "Plot window [s]", "enabled": "Enabled", "w1_device_glob": "1-Wire device path",
     "poll_interval_s": "Poll interval [s]", "compensation_enabled": "Temperature compensation",
     "alpha_ue_per_c": "Thermal drift α [µε/°C]",
+    "path": "File or folder", "start_at_end": "Only new rows (skip existing)",
+    "time_column": "Time column", "strain_column": "Strain column", "strain_unit": "Strain unit (V / µε)",
+    "pzt_column": "PZT column", "pzt_unit": "PZT unit", "temp_column": "Temperature column",
+    "sample_rate_hz": "Rate if no time column [Hz]",
 }
 SECTION_TITLES = {"beam": "Beam", "strain": "Strain gauge bridge", "pzt": "PZT charge amplifier",
-                  "daq": "ADC / Raspberry Pi", "temperature": "DS18B20 temperature"}
+                  "daq": "ADC / Raspberry Pi", "temperature": "DS18B20 temperature",
+                  "file_source": "Data file (SD card)"}
 CHOICES = {
     ("strain", "bridge_mode"): BRIDGE_MODES,
     ("strain", "polarity"): (1, -1),
@@ -75,12 +83,16 @@ CHOICES = {
     ("daq", "channel_mode"): CHANNEL_MODES,
     ("daq", "data_rate_sps"): tuple(sorted(DRATE_CODES, reverse=True)),
     ("daq", "pga_gain"): tuple(sorted(PGA_CODES)),
+    ("file_source", "strain_unit"): STRAIN_UNITS,
+    ("file_source", "pzt_unit"): PZT_UNITS,
 }
+SOURCE_NAMES = {"hardware": "HARDWARE", "simulation": "SIMULATION", "file": "FILE"}
+DATA_FILETYPES = [("Data files", " ".join(f"*{s}" for s in DATA_SUFFIXES)), ("All files", "*.*")]
 
 
 class DAQApp:
     def __init__(self, root: tk.Tk, controller: ExperimentController, prefer_simulation: bool = False,
-                 settings_path: Path = DEFAULT_SETTINGS_PATH):
+                 settings_path: Path = DEFAULT_SETTINGS_PATH, prefer_source: Optional[str] = None):
         self.root = root
         self.ctl = controller
         self.settings_path = Path(settings_path)
@@ -93,7 +105,7 @@ class DAQApp:
 
         hw_ok, hw_msg = hardware_libraries_available()
         self.hw_message = hw_msg
-        self.mode_var = tk.StringVar(value="simulation" if (prefer_simulation or not hw_ok) else "hardware")
+        self.mode_var = tk.StringVar(value=prefer_source or ("simulation" if (prefer_simulation or not hw_ok) else "hardware"))
 
         apply_theme()
         root.title(f"Cantilever Beam DAQ  {__version__}")
@@ -128,8 +140,12 @@ class DAQApp:
         ttk.Label(bar, text="Source:").pack(side=tk.LEFT)
         self.rb_hw = ttk.Radiobutton(bar, text="Hardware", variable=self.mode_var, value="hardware")
         self.rb_sim = ttk.Radiobutton(bar, text="Simulation", variable=self.mode_var, value="simulation")
+        self.rb_file = ttk.Radiobutton(bar, text="File (SD card)", variable=self.mode_var, value="file")
+        self.btn_choose_file = ttk.Button(bar, text="Choose file…", command=self.on_choose_file)
         self.rb_hw.pack(side=tk.LEFT, padx=(4, 0))
-        self.rb_sim.pack(side=tk.LEFT, padx=(4, 12))
+        self.rb_sim.pack(side=tk.LEFT, padx=(4, 0))
+        self.rb_file.pack(side=tk.LEFT, padx=(4, 0))
+        self.btn_choose_file.pack(side=tk.LEFT, padx=(2, 12))
         self.btn_start = ttk.Button(bar, text="▶ Start", style="Accent.TButton", command=self.on_start)
         self.btn_stop = ttk.Button(bar, text="■ Stop", command=self.on_stop)
         self.btn_tare = ttk.Button(bar, text="Tare (zero)", command=self.on_tare)
@@ -139,6 +155,8 @@ class DAQApp:
             b.pack(side=tk.LEFT, padx=3)
         self.mode_label = ttk.Label(bar, text="", style="Mode.TLabel")
         self.mode_label.pack(side=tk.RIGHT)
+        self.file_var = tk.StringVar(value=self._file_label())
+        ttk.Label(bar, textvariable=self.file_var, style="Unit.TLabel").pack(side=tk.RIGHT, padx=10)
 
     def _build_notebook(self) -> None:
         self.nb = ttk.Notebook(self.root)
@@ -212,7 +230,7 @@ class DAQApp:
         self.btn_tap.pack(fill=tk.X)
         self._update_alpha_label()
 
-        self.live_fig = Figure(figsize=(9, 7), dpi=100)
+        self.live_fig = Figure(figsize=(9, 8), dpi=100)
         self.live_axes = self.live_fig.subplots(len(LIVE_TRACES), 1, sharex=True)
         self.live_lines = {}
         for ax, (key, label, color, _span) in zip(self.live_axes, LIVE_TRACES):
@@ -222,7 +240,7 @@ class DAQApp:
             ax.margins(x=0)
         self.live_axes[-1].set_xlabel("Time [s]")
         self.live_axes[0].set_title("Live signals")
-        self.live_fig.subplots_adjust(left=0.10, right=0.98, top=0.95, bottom=0.07, hspace=0.12)
+        self.live_fig.subplots_adjust(left=0.10, right=0.98, top=0.96, bottom=0.08, hspace=0.12)
         self.live_canvas = self._make_canvas(right, self.live_fig)
 
     # ------------------------------------------------------------------ calibration tab
@@ -310,7 +328,8 @@ class DAQApp:
         self.setting_vars: Dict[Tuple[str, str], tk.Variable] = {}
         grid = ttk.Frame(outer)
         grid.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        positions = {"beam": (0, 0), "strain": (0, 1), "pzt": (1, 1), "daq": (0, 2), "temperature": (1, 0)}
+        positions = {"beam": (0, 0), "strain": (0, 1), "pzt": (1, 1), "daq": (0, 2), "temperature": (1, 0),
+                     "file_source": (1, 2)}
         for section, (row, col) in positions.items():
             frame = ttk.LabelFrame(grid, text=SECTION_TITLES[section], padding=8)
             frame.grid(row=row, column=col, sticky="nsew", padx=6, pady=6)
@@ -328,7 +347,9 @@ class DAQApp:
                                  width=14).grid(row=i, column=1, sticky="w")
                 else:
                     var = tk.StringVar(value=str(value))
-                    ttk.Entry(frame, textvariable=var, width=30 if isinstance(value, str) else 16).grid(row=i, column=1, sticky="w")
+                    width = (22 if f.name == "path" else 14) if section == "file_source" else \
+                        (30 if isinstance(value, str) else 16)
+                    ttk.Entry(frame, textvariable=var, width=width).grid(row=i, column=1, sticky="w")
                 self.setting_vars[key] = var
         for c in range(3):
             grid.columnconfigure(c, weight=1)
@@ -377,15 +398,21 @@ class DAQApp:
         self._set_state(self.btn_save, self.ctl.recorded_samples > 0 and not self.ctl.recording)
         self._set_state(self.rb_hw, not running)
         self._set_state(self.rb_sim, not running)
+        self._set_state(self.rb_file, not running)
+        self._set_state(self.btn_choose_file, not running)
         self._set_state(self.btn_capture, running and self._capture_job is None)
         self._set_state(self.btn_apply_settings, not running)
         self._set_state(self.sim_scale, sim)
         self._set_state(self.btn_tap, sim)
         self.btn_record.configure(text="■ Stop recording" if self.ctl.recording else "● Record")
         if running:
-            self.mode_label.configure(text="SIMULATION" if self.ctl.simulation else "HARDWARE")
+            self.mode_label.configure(text=SOURCE_NAMES.get(self.ctl.source, self.ctl.source.upper()))
         else:
             self.mode_label.configure(text="stopped")
+
+    def _file_label(self) -> str:
+        path = self.ctl.config.file_source.path.strip()
+        return f"File: {Path(path).name or path}" if path else "File: none"
 
     def _update_alpha_label(self) -> None:
         tc = self.ctl.config.temperature
@@ -449,8 +476,12 @@ class DAQApp:
         for key, _name, _unit, fmt in READOUTS:
             v = values.get(key, math.nan)
             self.readout_vars[key].set(fmt.format(v) if np.isfinite(v) else "—")
-        self.rate_var.set(f"Rate: {self.ctl.sample_rate_hz:.0f} samples/s  |  "
-                          f"{'DS18B20 OK' if self.ctl.temperature_available else 'no DS18B20'}")
+        if self.ctl.source == "file":
+            temp_state = "temp. from file" if self.ctl.frontend is not None and self.ctl.frontend.has_temperature \
+                else ("DS18B20 OK" if self.ctl.temperature_available else "no temperature")
+        else:
+            temp_state = "DS18B20 OK" if self.ctl.temperature_available else "no DS18B20"
+        self.rate_var.set(f"Rate: {self.ctl.sample_rate_hz:.0f} samples/s  |  {temp_state}")
         warn = []
         if values.get("strain_clip", 0) > 0:
             warn.append("Strain amplifier saturated: reduce load or INA gain.")
@@ -459,10 +490,30 @@ class DAQApp:
         self.clip_var.set("\n".join(warn))
 
     # ================================================================== toolbar actions
+    def on_choose_file(self) -> None:
+        path = filedialog.askopenfilename(parent=self.root, title="Choose the data file the logger writes",
+                                          filetypes=DATA_FILETYPES)
+        if not path:
+            return
+        self.ctl.config.file_source.path = path
+        self.setting_vars[("file_source", "path")].set(path)
+        self.mode_var.set("file")
+        self.file_var.set(self._file_label())
+        self._save_settings_quietly()
+        self.set_status(f"Data file: {path}. Press Start to plot it live.")
+
     def on_start(self) -> None:
-        simulate = self.mode_var.get() == "simulation"
+        source = self.mode_var.get()
+        simulate = source == "simulation"
+        if source == "file" and not self.ctl.config.file_source.path.strip():
+            self.on_choose_file()
+            if not self.ctl.config.file_source.path.strip():
+                return
         try:
-            self.ctl.start(simulate=simulate)
+            self.ctl.start(source=source)
+        except FileSourceError as exc:
+            self._error("Cannot read data file", exc)
+            return
         except HardwareError as exc:
             if messagebox.askyesno("Hardware not available",
                                    f"{exc}\n\nStart in simulation mode instead?", parent=self.root):
@@ -477,7 +528,10 @@ class DAQApp:
         for line in self.live_lines.values():
             line.set_data([], [])
         self._update_controls()
-        self.set_status(f"Running ({'simulation' if simulate else 'hardware'}). Press Tare with the beam unloaded.")
+        if source == "file":
+            self.set_status(f"Following {self.ctl.frontend.path.name}: {self.ctl.frontend.columns.describe()}.")
+        else:
+            self.set_status(f"Running ({source}). Press Tare with the beam unloaded.")
 
     def on_stop(self) -> None:
         self.ctl.stop()
@@ -649,13 +703,17 @@ class DAQApp:
         self._run_analysis(df, f"Current recording ({len(df)} samples)")
 
     def on_open_recording(self) -> None:
-        path = filedialog.askopenfilename(parent=self.root, title="Open recording",
-                                          filetypes=[("Recordings", "*.csv *.xlsx"), ("All files", "*.*")])
+        path = filedialog.askopenfilename(parent=self.root, title="Open recording", filetypes=DATA_FILETYPES)
         if not path:
             return
         try:
-            df, _meta = load_recording(path)
-        except (OSError, ValueError, ImportError) as exc:
+            try:
+                df, _meta = load_recording(path)
+            except ValueError:  # no t_s column: not this program's format
+                df = None
+            if df is None or "strain_ue" not in df.columns:
+                df = load_data_file(path, self.ctl.config)  # map the columns like File mode
+        except (OSError, ValueError, ImportError, FileSourceError) as exc:
             self._error("Open recording", exc)
             return
         self._run_analysis(df, f"{Path(path).name} ({len(df)} samples)")
@@ -760,6 +818,7 @@ class DAQApp:
             self._error("Settings", exc)
             return
         self._save_settings_quietly()
+        self.file_var.set(self._file_label())
         self._update_beam_info()
         self._update_alpha_label()
         self._refresh_calibration_view()
@@ -820,9 +879,9 @@ class DAQApp:
 
 
 def run_gui(config: Optional[AppConfig] = None, prefer_simulation: bool = False,
-            settings_path: Path = DEFAULT_SETTINGS_PATH) -> None:
+            settings_path: Path = DEFAULT_SETTINGS_PATH, prefer_source: Optional[str] = None) -> None:
     root = tk.Tk()
-    DAQApp(root, ExperimentController(config), prefer_simulation, settings_path)
+    DAQApp(root, ExperimentController(config), prefer_simulation, settings_path, prefer_source)
     root.mainloop()
 
 

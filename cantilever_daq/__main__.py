@@ -1,4 +1,4 @@
-"""Command-line entry point:  python3 -m cantilever_daq [--simulate] [--config FILE]"""
+"""Command-line entry point:  python3 -m cantilever_daq [--simulate | --file DATAFILE] [--config FILE]"""
 from __future__ import annotations
 
 import argparse
@@ -35,6 +35,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="cantilever_daq",
                                      description="Cantilever beam DAQ: strain gauge + PZT + DS18B20 on Raspberry Pi 5")
     parser.add_argument("--simulate", action="store_true", help="start in simulation mode (no hardware needed)")
+    parser.add_argument("--file", metavar="DATAFILE",
+                        help="start in File mode, plotting this CSV/XLSX file (or the newest file in this folder) live")
     parser.add_argument("--config", type=Path, help="settings JSON file to load and to save into")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -67,7 +69,11 @@ def main(argv=None) -> int:
     elif args.config:
         log.warning("%s does not exist yet; it will be created when you apply settings.", settings_path)
 
-    run_gui(config, prefer_simulation=args.simulate, settings_path=settings_path)
+    source = None
+    if args.file:
+        config.file_source.path = str(Path(args.file).expanduser().resolve())
+        source = "file"
+    run_gui(config, prefer_simulation=args.simulate, settings_path=settings_path, prefer_source=source)
     return 0
 
 

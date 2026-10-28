@@ -3,6 +3,7 @@
 
     python run_app.py              hardware if available, otherwise simulation
     python run_app.py --simulate   always simulation (any PC, no hardware needed)
+    python run_app.py --file /media/pi/SD/data/log.csv   plot a file that a logger writes, live
 
 Works from any folder and by double-click (Windows: run_windows.bat).
 """
@@ -55,7 +56,7 @@ if __name__ == "__main__":
         sys.exit(1)
     args = sys.argv[1:]
     # No SPI hardware on a normal PC: go straight to simulation mode.
-    if platform.system() != "Linux" and "--simulate" not in args:
+    if platform.system() != "Linux" and "--simulate" not in args and "--file" not in args:
         args.append("--simulate")
     from cantilever_daq.__main__ import main
     sys.exit(main(args))

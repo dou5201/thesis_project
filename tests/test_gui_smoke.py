@@ -171,6 +171,38 @@ class TestGuiSmoke(unittest.TestCase):
 
         self.assertEqual(self.unexpected(), [])
 
+    def test_file_mode(self):
+        app, root = self.app, self.root
+        data = self.dir / "sd_log.csv"
+        data.write_text("t_s,strain_ue,pzt_mV,temp_C\n" +
+                        "".join(f"{i * 0.01:.2f},{50 + i % 3},{i % 5},21.0\n" for i in range(300)))
+        DIALOGS.paths.append(str(data))
+        app.on_choose_file()
+        self.assertEqual(app.mode_var.get(), "file")
+        self.assertIn("sd_log.csv", app.file_var.get())
+        app.on_start()
+        self.assertTrue(app.ctl.running)
+        self.assertEqual(app.mode_label.cget("text"), "FILE")
+        root.pump(0.6)
+        self.assertAlmostEqual(float(app.readout_vars["strain_ue"].get()), 51.0, delta=1.0)
+        self.assertNotEqual(app.readout_vars["stress_MPa"].get(), "—")
+        with open(data, "a") as fh:                      # the logger keeps writing
+            fh.write("".join(f"{3 + i * 0.01:.2f},{200 + i % 3},0,21.5\n" for i in range(100)))
+        root.pump(0.6)
+        self.assertEqual(app.ctl.total_samples, 400)
+        self.assertAlmostEqual(float(app.readout_vars["temp_C"].get()), 21.5, places=2)
+        app.on_stop()
+        # the same generic file opens on the Analysis tab
+        DIALOGS.paths.append(str(data))
+        app.on_open_recording()
+        self.assertIn("sd_log.csv", app.ana_source_var.get())
+        # a missing file is reported, no simulation fallback is offered
+        app.ctl.config.file_source.path = str(self.dir / "missing.csv")
+        app.on_start()
+        self.assertEqual(DIALOGS.errors.pop()[0], "Cannot read data file")
+        self.assertFalse(app.ctl.running)
+        self.assertEqual(self.unexpected(), [])
+
     def test_errors_are_reported_not_raised(self):
         app = self.app
         app.on_tare()                      # not running

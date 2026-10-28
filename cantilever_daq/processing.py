@@ -14,7 +14,7 @@ CLIP_LIMIT_V = 2.40  # |AINp - AINn| above this means the amplifier is at its ra
 PROCESSED_COLUMNS = (
     "t_s", "v_strain_V", "v_pzt_V", "temp_C",
     "bridge_ratio", "strain_raw_ue", "strain_tc_ue", "strain_ue",
-    "deflection_mm", "force_N", "load_g",
+    "deflection_mm", "force_N", "load_g", "stress_MPa",
     "pzt_mV", "pzt_charge_nC", "strain_clip", "pzt_clip",
 )
 RAW_COLUMNS = ("t_s", "v_strain_V", "v_pzt_V", "temp_C")
@@ -89,6 +89,10 @@ class BeamModel:
     def strain_from_mass(self, mass_g):
         return self.strain_from_force(np.asarray(mass_g, dtype=float) / 1000.0 * STANDARD_GRAVITY)
 
+    def stress_from_strain(self, strain):
+        """Bending stress at the gauge (outer fibre), Hooke: s = E e [Pa]."""
+        return np.asarray(strain, dtype=float) * self.E
+
     def tip_deflection_from_force(self, force_n):
         return np.asarray(force_n, dtype=float) * self.L ** 3 / (3.0 * self.E * self.I)
 
@@ -116,6 +120,7 @@ class SignalProcessor:
         self.config = config
         self.beam = BeamModel(config.beam)
         self.tare = TareState()
+        self.detect_clipping = True  # False for data files that hold engineering values, not ADC voltages
 
     def set_tare(self, ratio0: float, v_pzt0: float, temp0: float) -> None:
         self.tare = TareState(
@@ -165,10 +170,11 @@ class SignalProcessor:
             "deflection_mm": self.beam.tip_deflection_from_strain(eps) * 1e3,
             "force_N": force,
             "load_g": force / STANDARD_GRAVITY * 1000.0,
+            "stress_MPa": self.beam.stress_from_strain(eps) / 1e6,
             "pzt_mV": pzt_v * 1e3,
             "pzt_charge_nC": -pzt_v * p.feedback_cap_nf,  # Vout = VREF - Q/Cf
-            "strain_clip": (np.abs(v_strain) > CLIP_LIMIT_V).astype(float),
-            "pzt_clip": (np.abs(v_pzt) > CLIP_LIMIT_V).astype(float),
+            "strain_clip": (np.abs(v_strain) > CLIP_LIMIT_V).astype(float) * self.detect_clipping,
+            "pzt_clip": (np.abs(v_pzt) > CLIP_LIMIT_V).astype(float) * self.detect_clipping,
         }
 
 
