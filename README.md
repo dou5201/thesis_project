@@ -3,7 +3,8 @@
 Desktop application for the cantilever bending experiment on a **Raspberry Pi 5** with the
 **Strain-PZT DAQ HAT rev 1.3** (ADS1256 + INA333 + OPA197 + REF5025 + DS18B20).
 
-- **Live view**: strain (µε), tip deflection (mm), equivalent tip load (g), PZT voltage and charge, temperature
+- **Live view**: strain (µε), tip deflection (mm), bending stress (MPa), equivalent tip load (g), PZT voltage and charge, temperature
+- **File mode (SD card)**: plots a CSV / TXT / Excel file live while a logger writes it, e.g. on the Pi's SD card (section 3a)
 - **Tare**: zeroes strain and PZT and stores the reference temperature
 - **Recording**: saves to CSV (or Excel), plus a JSON side-car file holding every setting
 - **Calibration**: known masses on the tip → fit against beam theory → applied to all values
@@ -62,6 +63,7 @@ python run_app.py
 cd ~/cantilever_daq_project
 python3 run_app.py              # uses the hardware if spidev + lgpio are installed
 python3 run_app.py --simulate   # simulation mode
+python3 run_app.py --file ~/cantilever_data   # File mode: follow the newest data file in this folder
 ```
 
 or double-click `run.sh` / `run_simulation.sh`. To get a desktop icon, copy `cantilever-daq.desktop`
@@ -87,6 +89,49 @@ Other ways that also work: `python -m cantilever_daq` from the top folder, or `p
 5. **Measure**: press **Record**, apply the loads or tap the beam, press **Stop recording**, then **Save recording…**.
 6. **Analysis tab**: statistics, measured natural frequency vs theory, thermal drift. **Save figure…** exports PNG/PDF/SVG.
 
+## 3a. File mode: plot data that a logger writes to the SD card
+
+Here the Pi reads the sensors with one program (the **logger**), which writes the values to a file on the
+SD card. The GUI only reads that file and plots the new rows as they arrive (every 0.2 s by default).
+
+**1. Start the logger** (it uses the same settings as the GUI, `~/.config/cantilever_daq/settings.json`):
+
+```bash
+python3 -m cantilever_daq.sd_logger --out ~/cantilever_data              # new log_YYYYmmdd_HHMMSS.csv per start
+python3 -m cantilever_daq.sd_logger --out ~/cantilever_data --simulate   # test without the HAT
+```
+
+It writes `t_s, v_strain_V, v_pzt_V, temp_C`, flushes every 0.1 s and syncs to the SD card every 5 s.
+Stop it with Ctrl+C. You can use your own logger instead (any sensor, any language): it only has to
+append rows with a header line to a CSV/TXT file.
+
+**2. Start the GUI**, select **File (SD card)** on the toolbar, press **Choose file…** and **Start**
+(or run `python3 run_app.py --file ~/cantilever_data`). Tare, Record, Calibration and Analysis work as usual.
+In **Settings → Data file** you can enter a **folder** instead of a file: the GUI then follows the newest
+file in it and switches when the logger starts a new one. *Only new rows* skips what is already in the file.
+
+**Supported files**: `.csv .txt .tsv .dat .log` (comma, semicolon, tab or space separated; decimal comma
+works with semicolon/tab files; lines starting with `#` are ignored) and `.xlsx`. For live logging use CSV:
+an Excel workbook has to be rewritten completely for every new row, so it is only re-read when it changes.
+
+**Columns are found by their header** (case, spaces, units in brackets and µ/ε/° don't matter):
+
+| Signal | Recognised names | Unit |
+|---|---|---|
+| time | `t_s`, `time`, `Time [s]`, `timestamp`, `datetime` | seconds, or a date/time like `2026-10-28 10:00:00.250` |
+| strain | `v_strain_V`, `strain_V` → bridge voltage; `strain_ue`, `Strain [µε]`, `strain`, `microstrain` → µε | V or µε |
+| PZT | `v_pzt_V`, `pzt_V`, `pzt`, `piezo` → V; `pzt_mV`, `PZT [mV]`, `piezo_mV` → mV | V or mV |
+| temperature | `temp_C`, `temperature`, `Temp [°C]` | °C |
+
+If your headers are different, enter the column **name or number** (first column = 0) and the unit in
+**Settings → Data file**; `none` ignores a signal. Without a time column the rows are spaced by
+*Rate if no time column*. Strain in µε and PZT in mV are converted to the equivalent ADC voltage with the
+current Settings, so tare, temperature compensation and calibration behave as in hardware mode
+(amplifier clipping is only detected for raw-voltage files). Deflection, load and stress are always
+computed from the strain with the beam settings. If the file has no temperature column the DS18B20 is used.
+
+The Analysis tab's **Open recording…** also opens such logger files.
+
 ## 4. Data file columns
 
 | Column | Meaning |
@@ -99,6 +144,7 @@ Other ways that also work: `python -m cantilever_daq` from the top folder, or `p
 | `strain_tc_ue` | strain after temperature compensation [µε] |
 | `strain_ue` | final strain after calibration [µε] |
 | `deflection_mm`, `force_N`, `load_g` | tip deflection, tip force and equivalent tip mass from beam theory |
+| `stress_MPa` | bending stress at the gauge, σ = E·ε |
 | `pzt_mV`, `pzt_charge_nC` | charge amplifier output after tare, and the PZT charge (Q = −V·Cf) |
 | `strain_clip`, `pzt_clip` | 1 when an amplifier is at its limit |
 
@@ -107,6 +153,7 @@ Other ways that also work: `python -m cantilever_daq` from the top folder, or `p
 - Half bridge: ε = −2·r / GF; quarter bridge: ε = −4·r / (GF·(1 + 2r)); full bridge: ε = −r / GF,
   with r = (AIN0 − AIN1) / (G_INA · V_exc). Set *Polarity* to −1 if tension reads negative.
 - Strain at the gauge: ε = 6·F·(L − x) / (E·b·h²); tip deflection: δ = 2·L³·ε / (3·h·(L − x))
+- Bending stress at the gauge (outer fibre): σ = E·ε
 - First natural frequency: f₁ = (1.8751² / 2πL²)·√(E·I / ρ·A) (no tip mass)
 - Temperature compensation: ε_tc = ε − α·(T − T_tare)
 
@@ -122,6 +169,9 @@ Other ways that also work: `python -m cantilever_daq` from the top folder, or `p
 | *no DS18B20* in the status line | check `dtoverlay=w1-gpio,gpiopin=26`, the 4.7 kΩ pull-up and the wiring on J5 |
 | *PZT charge amp saturated* | the PZT signal exceeds ±2.4 V; increase C26 (see hardware note) |
 | *Tkinter is missing* | `sudo apt install python3-tk` |
+| *No strain or PZT column found* | rename the header, or set the column names/numbers in Settings → Data file |
+| File mode shows nothing new | the logger must flush (write complete lines); check *Only new rows* and the path |
+| *Cannot open /dev/spidev0.0* while the logger runs | only one program can own the HAT: use File mode in the GUI |
 
 The log file is `~/.cache/cantilever_daq/cantilever_daq.log`.
 
@@ -138,9 +188,9 @@ For larger vibrations, fit **C26 = 100 nF C0G (1206, e.g. Murata GRM31C5C1H104JA
 python3 -m unittest discover -s . -p "test_*.py" -v
 ```
 
-25 tests cover the bridge and beam formulas, the configuration, the DS18B20 reader, the ADS1256 driver
-(against an emulated chip), the simulator, the full controller workflow, and a GUI smoke test that drives
-every button.
+34 tests cover the bridge and beam formulas, the configuration, the DS18B20 reader, the ADS1256 driver
+(against an emulated chip), the simulator, the full controller workflow, the data-file reader (live tailing,
+column detection, folder mode, Excel, logger + GUI together), and a GUI smoke test that drives every button.
 
 ## 9. Project structure
 
@@ -149,6 +199,8 @@ cantilever_daq/
   config.py       settings dataclasses, JSON load/save, validation
   processing.py   bridge and beam formulas, signal processing, spectrum, fits
   hardware.py     ADS1256 driver (spidev + lgpio), DS18B20 reader, simulator
+  file_source.py  File mode: follows a CSV/TXT/XLSX file or folder written by a logger
+  sd_logger.py    headless logger: HAT -> CSV file on the SD card
   acquisition.py  acquisition and temperature threads, ring buffer, experiment controller
   analysis.py     pandas statistics, seaborn/matplotlib plots
   gui.py          Tkinter user interface

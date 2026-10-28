@@ -20,6 +20,8 @@ DRATE_CODES: Dict[int, int] = {
 PGA_CODES: Dict[int, int] = {1: 0, 2: 1, 4: 2, 8: 3, 16: 4, 32: 5, 64: 6}
 BRIDGE_MODES = ("quarter", "half", "full")
 CHANNEL_MODES = ("strain+pzt", "strain", "pzt")
+STRAIN_UNITS = ("auto", "V", "ue")      # data file: bridge voltage or microstrain
+PZT_UNITS = ("auto", "V", "mV")
 STANDARD_GRAVITY = 9.80665
 
 
@@ -78,6 +80,21 @@ class TemperatureConfig:
 
 
 @dataclass
+class FileSourceConfig:
+    """Data file written by a logger (e.g. on the SD card), read live in "File" mode."""
+    path: str = ""                    # CSV / TXT / XLSX file, or a folder (its newest file is followed)
+    start_at_end: bool = False        # True: skip the rows already in the file, show only new ones
+    poll_interval_s: float = 0.2      # how often to look for new rows
+    time_column: str = "auto"         # "auto", a column name, a column number (first = 0) or "none"
+    strain_column: str = "auto"
+    strain_unit: str = "auto"         # V (raw bridge voltage AIN0-AIN1) or ue (microstrain)
+    pzt_column: str = "auto"
+    pzt_unit: str = "auto"            # V or mV
+    temp_column: str = "auto"
+    sample_rate_hz: float = 100.0     # only used when the file has no time column
+
+
+@dataclass
 class CalibrationConfig:
     """Polynomial mapping measured strain -> true strain (numpy.polyval order)."""
     enabled: bool = False
@@ -92,8 +109,9 @@ class AppConfig:
     daq: DAQConfig = field(default_factory=DAQConfig)
     temperature: TemperatureConfig = field(default_factory=TemperatureConfig)
     calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
+    file_source: FileSourceConfig = field(default_factory=FileSourceConfig)
 
-    SECTIONS = ("beam", "strain", "pzt", "daq", "temperature", "calibration")
+    SECTIONS = ("beam", "strain", "pzt", "daq", "temperature", "calibration", "file_source")
 
     # ------------------------------------------------------------------ serialisation
     def to_dict(self) -> Dict[str, Any]:
@@ -153,6 +171,11 @@ class AppConfig:
             e.append("VREF and plot window must be > 0.")
         if t.poll_interval_s < 0.75:
             e.append("DS18B20 poll interval must be >= 0.75 s (12-bit conversion time).")
+        f = self.file_source
+        if f.strain_unit not in STRAIN_UNITS or f.pzt_unit not in PZT_UNITS:
+            e.append(f"Data file units must be one of {STRAIN_UNITS} (strain) and {PZT_UNITS} (PZT).")
+        if not 0.01 <= f.poll_interval_s <= 10 or f.sample_rate_hz <= 0:
+            e.append("Data file poll interval must be 0.01-10 s and its sample rate > 0.")
         if len(self.calibration.coefficients) < 2:
             e.append("Calibration needs at least 2 coefficients.")
         return e

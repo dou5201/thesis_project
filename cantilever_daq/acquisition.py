@@ -17,6 +17,7 @@ import pandas as pd
 
 from . import __version__
 from .config import AppConfig
+from .file_source import FileFrontEnd
 from .hardware import (DS18B20, ADS1256FrontEnd, Sample,
                        SimulatedFrontEnd)
 from .processing import (PROCESSED_COLUMNS, SignalProcessor, fit_polynomial,
@@ -63,7 +64,9 @@ class TemperatureMonitor(threading.Thread):
 
 # ====================================================================== acquisition thread
 class AcquisitionWorker(threading.Thread):
-    """Reads samples as fast as the front end allows and ships them to the GUI in batches."""
+    """Reads samples as fast as the front end allows and ships them to the GUI in batches.
+
+    Front ends that implement ``read_available()`` (the data-file reader) deliver many samples per call."""
 
     def __init__(self, frontend, out_queue: "queue.Queue", temperature: Optional[TemperatureMonitor],
                  batch_period_s: float = 0.05):
@@ -80,13 +83,17 @@ class AcquisitionWorker(threading.Thread):
     def run(self) -> None:
         batch: List[Sample] = []
         last_flush = time.perf_counter()
+        read_many = getattr(self.frontend, "read_available", None)
         try:
             while not self._stop_evt.is_set():
-                s = self.frontend.read_sample()
-                s.temp_c = self.temperature.latest if self.temperature is not None else NAN
-                batch.append(s)
+                samples = read_many() if read_many is not None else [self.frontend.read_sample()]
+                if self.temperature is not None:
+                    temp = self.temperature.latest
+                    for s in samples:
+                        s.temp_c = temp
+                batch.extend(samples)
                 now = time.perf_counter()
-                if now - last_flush >= self.batch_period_s:
+                if now - last_flush >= self.batch_period_s and batch:
                     self.out_queue.put(("data", batch))
                     batch = []
                     last_flush = now
@@ -171,6 +178,7 @@ class ExperimentController:
         self.queue: "queue.Queue" = queue.Queue()
         self.store = DataStore(self._buffer_len())
         self.frontend = None
+        self.source = "hardware"   # "hardware", "simulation" or "file"
         self.worker: Optional[AcquisitionWorker] = None
         self.temp_monitor: Optional[TemperatureMonitor] = None
         self.temperature_available = False
@@ -197,7 +205,11 @@ class ExperimentController:
         return int(min(max(self.config.daq.plot_window_s, 30.0) * rate * 1.2, 300_000))
 
     # ------------------------------------------------------------ run control
-    def start(self, simulate: bool, seed: Optional[int] = None, realtime: bool = True) -> None:
+    def start(self, simulate: bool = False, seed: Optional[int] = None, realtime: bool = True,
+              source: Optional[str] = None) -> None:
+        """Start acquiring from ``source`` ("hardware", "simulation" or "file"; default from ``simulate``)."""
+        source = source or ("simulation" if simulate else "hardware")
+        simulate = source == "simulation"
         if self.running:
             raise RuntimeError("Acquisition is already running.")
         problems = self.config.validate()
@@ -208,14 +220,20 @@ class ExperimentController:
         self.queue = queue.Queue()
         if simulate:
             frontend = SimulatedFrontEnd(self.config, seed=seed, realtime=realtime)
+        elif source == "file":
+            frontend = FileFrontEnd(self.config)
         else:
             frontend = ADS1256FrontEnd(self.config.daq)
         frontend.open()  # raises HardwareError with a helpful message
         self.frontend = frontend
+        self.source = source
+        self.processor.detect_clipping = getattr(frontend, "raw_voltages", True)
 
         self.temp_monitor = None
         self.temperature_available = False
-        if self.config.temperature.enabled:
+        if source == "file" and frontend.has_temperature:
+            self.temperature_available = True    # the temperature comes from the file
+        elif self.config.temperature.enabled:
             if simulate:
                 read = frontend.read_temperature
                 self.temperature_available = True
@@ -235,7 +253,7 @@ class ExperimentController:
         self.total_samples = 0
         self.sample_rate_hz = 0.0
         self.last_error = None
-        log.info("Acquisition started (%s)", "simulation" if simulate else "hardware")
+        log.info("Acquisition started (%s)", source)
 
     def stop(self) -> None:
         if self.recording:
@@ -296,7 +314,8 @@ class ExperimentController:
 
     # ------------------------------------------------------------ live values
     def latest_values(self, window_s: float = 0.25) -> Dict[str, float]:
-        cols = ("strain_ue", "deflection_mm", "load_g", "pzt_mV", "pzt_charge_nC", "temp_C", "strain_clip", "pzt_clip")
+        cols = ("strain_ue", "deflection_mm", "load_g", "stress_MPa", "pzt_mV", "pzt_charge_nC", "temp_C",
+                "strain_clip", "pzt_clip")
         a = self.store.arrays(cols, last_seconds=window_s)
         out = {c: window_mean(a[c]) for c in cols}
         out["strain_clip"] = float(np.nanmax(a["strain_clip"])) if a["strain_clip"].size else 0.0
@@ -353,7 +372,8 @@ class ExperimentController:
             "software": f"cantilever_daq {__version__}",
             "created": datetime.now().isoformat(timespec="seconds"),
             "recording_started": self.recording_started.isoformat(timespec="seconds") if self.recording_started else None,
-            "mode": "simulation" if self.simulation else "hardware",
+            "mode": self.source,
+            "data_file": str(self.frontend.path) if self.source == "file" and self.frontend is not None else None,
             "samples": self.recorded_samples,
             "tare": {"ratio0": self.processor.tare.ratio0, "v_pzt0_V": self.processor.tare.v_pzt0,
                      "temp0_C": self.processor.tare.temp0},

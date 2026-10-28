@@ -18,8 +18,9 @@ from matplotlib.figure import Figure
 from .config import AppConfig
 from .processing import BeamModel, amplitude_spectrum, dominant_frequency, fit_polynomial
 
-SUMMARY_COLUMNS = ("strain_ue", "deflection_mm", "load_g", "pzt_mV", "pzt_charge_nC", "temp_C")
-COLORS = {"strain": "#1f6f4a", "defl": "#2b5d9b", "pzt": "#b5541b", "temp": "#8e3b8e", "theory": "#555555"}
+SUMMARY_COLUMNS = ("strain_ue", "deflection_mm", "load_g", "stress_MPa", "pzt_mV", "pzt_charge_nC", "temp_C")
+COLORS = {"strain": "#1f6f4a", "defl": "#2b5d9b", "pzt": "#b5541b", "temp": "#8e3b8e", "stress": "#9b2b2b",
+          "theory": "#555555"}
 
 
 def apply_theme() -> None:
