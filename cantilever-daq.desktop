@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Cantilever Beam DAQ
+Comment=Strain gauge + PZT + DS18B20 measurement
+Exec=/home/pi/cantilever_daq_project/run.sh
+Path=/home/pi/cantilever_daq_project
+Terminal=false
+Categories=Science;Education;
